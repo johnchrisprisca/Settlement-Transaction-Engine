@@ -31,6 +31,8 @@
 (define-constant ERR-INTEREST-CALCULATION-FAILED (err u115))
 (define-constant ERR-INVALID-INTEREST-RATE (err u116))
 (define-constant ERR-DEBT-CLAIM-NOT-FOUND (err u117))
+(define-constant ERR-INVALID-INPUT (err u118))
+(define-constant ERR-ARBITRATOR-POOL-FULL (err u119))
 
 ;; PROTOCOL CONFIGURATION AND GOVERNANCE
 
@@ -92,6 +94,28 @@
 ;; Claim ID tracking for each debtor-creditor pair
 (define-map claim-counter {debtor: principal, creditor: principal} uint)
 
+;; INPUT VALIDATION HELPER FUNCTIONS
+
+;; Validate principal address (not null/empty)
+(define-private (is-valid-principal (address principal))
+  (not (is-eq address 'SP000000000000000000002Q6VF78)))
+
+;; Validate string input (50 chars)
+(define-private (is-valid-string-50 (input (string-ascii 50)))
+  (> (len input) u0))
+
+;; Validate string input (200 chars)
+(define-private (is-valid-string-200 (input (string-ascii 200)))
+  (> (len input) u0))
+
+;; Validate uint input (greater than 0)
+(define-private (is-valid-uint (input uint))
+  (> input u0))
+
+;; Validate claim ID
+(define-private (is-valid-claim-id (claim-id uint))
+  (> claim-id u0))
+
 ;; PROTOCOL INITIALIZATION AND GOVERNANCE
 
 ;; Initialize the decentralized debt resolution protocol with administrative controls
@@ -103,24 +127,30 @@
 
 ;; Add authorized arbitrator to the system
 (define-public (add-arbitrator (arbitrator-address principal))
-  (begin
-    (asserts! (is-eq tx-sender (var-get protocol-admin)) ERR-UNAUTHORIZED-ACCESS)
-    (map-set authorized-arbitrators arbitrator-address 
-      {is-active: true, cases-resolved: u0, reputation-score: u100})
-    (var-set arbitrator-pool (unwrap-panic (as-max-len? (append (var-get arbitrator-pool) arbitrator-address) u10)))
-    (ok true)))
+  (let ((current-pool (var-get arbitrator-pool)))
+    (begin
+      (asserts! (is-eq tx-sender (var-get protocol-admin)) ERR-UNAUTHORIZED-ACCESS)
+      (asserts! (is-valid-principal arbitrator-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (< (len current-pool) u10) ERR-ARBITRATOR-POOL-FULL)
+      
+      (map-set authorized-arbitrators arbitrator-address 
+        {is-active: true, cases-resolved: u0, reputation-score: u100})
+      (var-set arbitrator-pool (unwrap-panic (as-max-len? (append current-pool arbitrator-address) u10)))
+      (ok true))))
 
 ;; PARTICIPANT REGISTRATION AND ONBOARDING SYSTEM
 
 ;; Register a new creditor entity in the debt resolution protocol
 (define-public (register-new-creditor)
   (begin
+    (asserts! (is-valid-principal tx-sender) ERR-INVALID-PRINCIPAL-ADDRESS)
     (map-set registered-creditor-claims tx-sender u0)
     (ok true)))
 
 ;; Register a new debtor entity in the debt resolution protocol
 (define-public (register-new-debtor)
   (begin
+    (asserts! (is-valid-principal tx-sender) ERR-INVALID-PRINCIPAL-ADDRESS)
     (map-set registered-debtor-obligations tx-sender u0)
     (ok true)))
 
@@ -139,7 +169,8 @@
   )
     (begin
       ;; Comprehensive input validation and business rule enforcement
-      (asserts! (> claim-amount u0) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-principal target-debtor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-uint claim-amount) ERR-INVALID-AMOUNT)
       (asserts! (is-some (map-get? registered-creditor-claims tx-sender)) ERR-CREDITOR-NOT-REGISTERED)
       (asserts! (<= interest-rate u2000) ERR-INVALID-INTEREST-RATE) ;; Max 20% annual
       
@@ -193,6 +224,10 @@
     (new-total-interest (+ (get total-accrued-interest claim-data) interest-calculation))
   )
     (begin
+      ;; Input validation
+      (asserts! (is-valid-principal debtor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-principal creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-claim-id claim-id) ERR-INVALID-INPUT)
       (asserts! (get is-active claim-data) ERR-DEBT-CLAIM-NOT-FOUND)
       (asserts! (> blocks-elapsed u0) ERR-INTEREST-CALCULATION-FAILED)
       
@@ -227,7 +262,10 @@
   )
     (begin
       ;; Validate dispute parameters
-      (asserts! (> amount-disputed u0) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-principal defendant-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-string-50 dispute-type) ERR-INVALID-INPUT)
+      (asserts! (is-valid-uint amount-disputed) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-claim-id claim-id) ERR-INVALID-INPUT)
       (asserts! (not (is-eq tx-sender defendant-address)) ERR-PARAMETER-MISMATCH)
       
       ;; Create dispute record
@@ -255,8 +293,10 @@
     (arbitrator-data (unwrap! (map-get? authorized-arbitrators arbitrator-address) ERR-ARBITRATOR-NOT-AUTHORIZED))
   )
     (begin
-      ;; Validate arbitrator assignment
+      ;; Validate inputs and arbitrator assignment
       (asserts! (is-eq tx-sender (var-get protocol-admin)) ERR-UNAUTHORIZED-ACCESS)
+      (asserts! (is-valid-uint dispute-id) ERR-INVALID-INPUT)
+      (asserts! (is-valid-principal arbitrator-address) ERR-INVALID-PRINCIPAL-ADDRESS)
       (asserts! (is-eq (get status dispute-data) "pending") ERR-INVALID-DISPUTE-STATUS)
       (asserts! (get is-active arbitrator-data) ERR-ARBITRATOR-NOT-AUTHORIZED)
       
@@ -279,7 +319,9 @@
     (arbitrator-data (unwrap! (map-get? authorized-arbitrators tx-sender) ERR-ARBITRATOR-NOT-AUTHORIZED))
   )
     (begin
-      ;; Validate arbitrator authority and dispute status
+      ;; Validate inputs and arbitrator authority
+      (asserts! (is-valid-uint dispute-id) ERR-INVALID-INPUT)
+      (asserts! (is-valid-string-200 resolution-details) ERR-INVALID-INPUT)
       (asserts! (is-eq (some tx-sender) (get arbitrator dispute-data)) ERR-ARBITRATOR-NOT-AUTHORIZED)
       (asserts! (is-eq (get status dispute-data) "in-review") ERR-DISPUTE-ALREADY-RESOLVED)
       (asserts! (get is-active arbitrator-data) ERR-ARBITRATOR-NOT-AUTHORIZED)
@@ -314,6 +356,8 @@
     (debtor-registration-exists (is-some (map-get? registered-debtor-obligations target-debtor-address)))
   )
     (begin
+      ;; Input validation
+      (asserts! (is-valid-principal target-debtor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
       ;; Validate participant registration status and prevent duplicate approvals
       (asserts! (is-some (map-get? registered-creditor-claims tx-sender)) ERR-CREDITOR-NOT-REGISTERED)
       (asserts! debtor-registration-exists ERR-DEBTOR-NOT-REGISTERED)
@@ -337,11 +381,13 @@
                                 {debtor-address: tx-sender, creditor-address: target-creditor-address})))
   )
     (begin
+      ;; Input validation
+      (asserts! (is-valid-principal target-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-uint settlement-amount) ERR-INVALID-AMOUNT)
       ;; Comprehensive pre-settlement validation and authorization checks
       (asserts! (is-some (map-get? registered-creditor-claims target-creditor-address)) ERR-CREDITOR-NOT-REGISTERED)
       (asserts! (>= debtor-outstanding-obligations settlement-amount) ERR-INSUFFICIENT-BALANCE)
       (asserts! settlement-consent-granted ERR-APPROVAL-REQUIRED)
-      (asserts! (> settlement-amount u0) ERR-INVALID-AMOUNT)
       (asserts! (<= settlement-amount creditor-outstanding-claims) ERR-INVALID-AMOUNT)
       
       ;; Execute secure STX transfer from debtor to creditor
@@ -371,12 +417,18 @@
     (available-debtor-balance (default-to u0 (map-get? registered-debtor-obligations debtor-initiating-settlement)))
   )
     (begin
+      ;; Input validation for all creditor addresses
+      (asserts! (is-valid-principal first-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-principal second-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-principal third-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-principal fourth-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-principal fifth-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
       ;; Validate all settlement amounts and debtor financial capacity
-      (asserts! (> first-settlement-amount u0) ERR-INVALID-AMOUNT)
-      (asserts! (> second-settlement-amount u0) ERR-INVALID-AMOUNT)
-      (asserts! (> third-settlement-amount u0) ERR-INVALID-AMOUNT)
-      (asserts! (> fourth-settlement-amount u0) ERR-INVALID-AMOUNT)
-      (asserts! (> fifth-settlement-amount u0) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-uint first-settlement-amount) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-uint second-settlement-amount) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-uint third-settlement-amount) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-uint fourth-settlement-amount) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-uint fifth-settlement-amount) ERR-INVALID-AMOUNT)
       (asserts! (>= available-debtor-balance total-batch-settlement-amount) ERR-INSUFFICIENT-BALANCE)
       
       ;; Execute sequential individual settlements within batch transaction
@@ -399,10 +451,14 @@
     (available-debtor-balance (default-to u0 (map-get? registered-debtor-obligations debtor-initiating-settlement)))
   )
     (begin
+      ;; Input validation for all creditor addresses
+      (asserts! (is-valid-principal first-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-principal second-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-principal third-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
       ;; Validate all settlement amounts and debtor financial capacity
-      (asserts! (> first-settlement-amount u0) ERR-INVALID-AMOUNT)
-      (asserts! (> second-settlement-amount u0) ERR-INVALID-AMOUNT)
-      (asserts! (> third-settlement-amount u0) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-uint first-settlement-amount) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-uint second-settlement-amount) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-uint third-settlement-amount) ERR-INVALID-AMOUNT)
       (asserts! (>= available-debtor-balance total-batch-settlement-amount) ERR-INSUFFICIENT-BALANCE)
       
       ;; Execute sequential individual settlements within batch transaction
@@ -422,9 +478,12 @@
     (available-debtor-balance (default-to u0 (map-get? registered-debtor-obligations debtor-initiating-settlement)))
   )
     (begin
+      ;; Input validation for all creditor addresses
+      (asserts! (is-valid-principal first-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-principal second-creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
       ;; Validate all settlement amounts and debtor financial capacity
-      (asserts! (> first-settlement-amount u0) ERR-INVALID-AMOUNT)
-      (asserts! (> second-settlement-amount u0) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-uint first-settlement-amount) ERR-INVALID-AMOUNT)
+      (asserts! (is-valid-uint second-settlement-amount) ERR-INVALID-AMOUNT)
       (asserts! (>= available-debtor-balance total-batch-settlement-amount) ERR-INSUFFICIENT-BALANCE)
       
       ;; Execute sequential individual settlements within batch transaction
@@ -441,15 +500,22 @@
 
 ;; Query outstanding claims for a specific creditor entity
 (define-read-only (get-creditor-outstanding-claims (creditor-address principal))
-  (ok (default-to u0 (map-get? registered-creditor-claims creditor-address))))
+  (begin
+    (asserts! (is-valid-principal creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+    (ok (default-to u0 (map-get? registered-creditor-claims creditor-address)))))
 
 ;; Query total financial obligations for a specific debtor entity
 (define-read-only (get-debtor-total-obligations (debtor-address principal))
-  (ok (default-to u0 (map-get? registered-debtor-obligations debtor-address))))
+  (begin
+    (asserts! (is-valid-principal debtor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+    (ok (default-to u0 (map-get? registered-debtor-obligations debtor-address)))))
 
 ;; Check settlement consent status between debtor and creditor entities
 (define-read-only (check-settlement-consent-status (debtor-address principal) (creditor-address principal))
-  (ok (default-to false (map-get? settlement-consent-matrix {debtor-address: debtor-address, creditor-address: creditor-address}))))
+  (begin
+    (asserts! (is-valid-principal debtor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+    (asserts! (is-valid-principal creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+    (ok (default-to false (map-get? settlement-consent-matrix {debtor-address: debtor-address, creditor-address: creditor-address})))))
 
 ;; Get current protocol administrator
 (define-read-only (get-protocol-administrator)
@@ -460,15 +526,23 @@
                   (debtor-address principal) 
                   (creditor-address principal) 
                   (claim-id uint))
-  (ok (map-get? debt-claims {debtor: debtor-address, creditor: creditor-address, claim-id: claim-id})))
+  (begin
+    (asserts! (is-valid-principal debtor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+    (asserts! (is-valid-principal creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+    (asserts! (is-valid-claim-id claim-id) ERR-INVALID-INPUT)
+    (ok (map-get? debt-claims {debtor: debtor-address, creditor: creditor-address, claim-id: claim-id}))))
 
 ;; Get dispute information by ID
 (define-read-only (get-dispute-details (dispute-id uint))
-  (ok (map-get? dispute-records dispute-id)))
+  (begin
+    (asserts! (is-valid-uint dispute-id) ERR-INVALID-INPUT)
+    (ok (map-get? dispute-records dispute-id))))
 
 ;; Get arbitrator information and performance metrics
 (define-read-only (get-arbitrator-info (arbitrator-address principal))
-  (ok (map-get? authorized-arbitrators arbitrator-address)))
+  (begin
+    (asserts! (is-valid-principal arbitrator-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+    (ok (map-get? authorized-arbitrators arbitrator-address))))
 
 ;; Calculate current total debt amount including accrued interest
 (define-read-only (calculate-total-debt-with-interest 
@@ -484,7 +558,11 @@
                           (* annual-blocks u10000)))
     (total-amount (+ (get principal-amount claim-data) (get total-accrued-interest claim-data) additional-interest))
   )
-    (ok total-amount)))
+    (begin
+      (asserts! (is-valid-principal debtor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-principal creditor-address) ERR-INVALID-PRINCIPAL-ADDRESS)
+      (asserts! (is-valid-claim-id claim-id) ERR-INVALID-INPUT)
+      (ok total-amount))))
 
 ;; Get total number of active disputes
 (define-read-only (get-active-disputes-count)
